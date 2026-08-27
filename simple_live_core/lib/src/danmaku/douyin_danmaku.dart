@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:simple_live_core/simple_live_core.dart';
+import 'package:simple_live_core/src/common/drop_oldest_queue.dart';
 import 'package:simple_live_core/src/common/http_client.dart';
 import 'package:simple_live_core/src/common/web_socket_util.dart';
 import 'package:simple_live_core/src/danmaku/douyin_emoji_assets.dart';
@@ -44,12 +45,23 @@ class DouyinDanmaku implements LiveDanmaku {
   String serverUrl = "wss://webcast3-ws-web-lq.douyin.com/webcast/im/push/v2/";
   late DouyinDanmakuArgs danmakuArgs;
   WebScoketUtils? webScoketUtils;
-  final List<LiveMessage> _pendingChatMessages = <LiveMessage>[];
+  final DropOldestQueue<LiveMessage> _pendingChatMessages =
+      DropOldestQueue<LiveMessage>(_maxPendingChatMessages);
   Timer? _flushChatTimer;
   _DouyinImContext? _imContext;
   bool _contextRefreshUsed = false;
-  static const int _maxChatFlushBatch = 50;
-  static const Duration _chatFlushInterval = Duration(milliseconds: 80);
+  int _droppedChatMessagesSinceLog = 0;
+  DateTime? _lastChatDropLogAt;
+  DateTime? _lastDecodeDiagnosticAt;
+
+  // Rendering every received message can starve Flutter's UI isolate in a
+  // busy Douyin room while native audio keeps playing. Keep at most four
+  // seconds of recent chat and cap delivery to 20 messages/second.
+  static const int _maxPendingChatMessages = 80;
+  static const int _maxChatFlushBatch = 4;
+  static const Duration _chatFlushInterval = Duration(milliseconds: 200);
+  static const Duration _chatDropLogInterval = Duration(seconds: 5);
+  static const Duration _decodeDiagnosticInterval = Duration(seconds: 5);
 
   @override
   Future start(dynamic args) async {
@@ -333,9 +345,15 @@ class DouyinDanmaku implements LiveDanmaku {
     final counts = _consumeResponse(payloadPackage, logId: wssPackage.logId);
     stopwatch.stop();
     if (stopwatch.elapsedMilliseconds >= 16 || counts.$2 >= 20) {
-      CoreLog.i(
-        "[DouyinDanmaku] decodeMessage 耗时 ${stopwatch.elapsedMilliseconds}ms messages=${counts.$1} chats=${counts.$2}",
-      );
+      final now = DateTime.now();
+      if (_lastDecodeDiagnosticAt == null ||
+          now.difference(_lastDecodeDiagnosticAt!) >=
+              _decodeDiagnosticInterval) {
+        _lastDecodeDiagnosticAt = now;
+        CoreLog.i(
+          "[DouyinDanmaku] decodeMessage 耗时 ${stopwatch.elapsedMilliseconds}ms messages=${counts.$1} chats=${counts.$2}",
+        );
+      }
     }
   }
 
@@ -396,11 +414,7 @@ class DouyinDanmaku implements LiveDanmaku {
   }
 
   void _enqueueChatMessage(LiveMessage message) {
-    _pendingChatMessages.add(message);
-    if (_pendingChatMessages.length >= _maxChatFlushBatch) {
-      _flushChatTimer ??= Timer(Duration.zero, _flushChatMessages);
-      return;
-    }
+    _droppedChatMessagesSinceLog += _pendingChatMessages.add(message);
     _flushChatTimer ??= Timer(_chatFlushInterval, _flushChatMessages);
   }
 
@@ -410,17 +424,31 @@ class DouyinDanmaku implements LiveDanmaku {
     if (_pendingChatMessages.isEmpty) {
       return;
     }
-    final batchSize = _pendingChatMessages.length > _maxChatFlushBatch
-        ? _maxChatFlushBatch
-        : _pendingChatMessages.length;
-    final batch = _pendingChatMessages.sublist(0, batchSize);
-    _pendingChatMessages.removeRange(0, batchSize);
+    _logDroppedChatMessagesIfNeeded();
+    final batch = _pendingChatMessages.takeFirst(_maxChatFlushBatch);
     for (final message in batch) {
       onMessage?.call(message);
     }
     if (_pendingChatMessages.isNotEmpty) {
       _flushChatTimer = Timer(_chatFlushInterval, _flushChatMessages);
     }
+  }
+
+  void _logDroppedChatMessagesIfNeeded() {
+    if (_droppedChatMessagesSinceLog == 0) {
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastChatDropLogAt != null &&
+        now.difference(_lastChatDropLogAt!) < _chatDropLogInterval) {
+      return;
+    }
+    CoreLog.w(
+      '[DouyinDanmaku] 弹幕过载，已丢弃 '
+      '$_droppedChatMessagesSinceLog 条旧消息，保留最新消息',
+    );
+    _droppedChatMessagesSinceLog = 0;
+    _lastChatDropLogAt = now;
   }
 
   String _buildChatMessageText(
@@ -565,6 +593,9 @@ class DouyinDanmaku implements LiveDanmaku {
     _flushChatTimer?.cancel();
     _flushChatTimer = null;
     _pendingChatMessages.clear();
+    _droppedChatMessagesSinceLog = 0;
+    _lastChatDropLogAt = null;
+    _lastDecodeDiagnosticAt = null;
     onMessage = null;
     onClose = null;
     onReady = null;

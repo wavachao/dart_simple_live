@@ -211,6 +211,7 @@ class LiveRoomController extends PlayerController
   Timer? _liveEventFlowTimer;
   Timer? _superChatRefreshTimer;
   Timer? _chatBottomRestoreTimer;
+  bool _chatAutoScrollFramePending = false;
   Timer? _onlineRefreshTimer;
   Timer? _memoryCleanupTimer; // 内存清理定时器
   bool _onlineRefreshInFlight = false;
@@ -1385,6 +1386,21 @@ class LiveRoomController extends PlayerController
     }
   }
 
+  /// Coalesces a burst of chat updates into one scroll operation per frame.
+  void _scheduleChatScrollToBottom() {
+    if (_chatAutoScrollFramePending) {
+      return;
+    }
+    _chatAutoScrollFramePending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _chatAutoScrollFramePending = false;
+      if (_roomDisposed) {
+        return;
+      }
+      chatScrollToBottom();
+    });
+  }
+
   void forceChatScrollToBottom({Duration delay = Duration.zero}) {
     _chatBottomRestoreTimer?.cancel();
     _chatBottomRestoreTimer = Timer(delay, () {
@@ -1437,9 +1453,7 @@ class LiveRoomController extends PlayerController
         messages.removeRange(0, 500); // 保留最近 500 条
       }
 
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => chatScrollToBottom(),
-      );
+      _scheduleChatScrollToBottom();
       if (!liveStatus.value || (isBackground && !_allowBackgroundPlayback)) {
         return;
       }
@@ -1466,7 +1480,8 @@ class LiveRoomController extends PlayerController
       if (AppSettingsController.instance.superChatScrollInFullscreen.value &&
           fullScreenState.value) {
         // 格式化为：【头条】用户名：内容
-        final formattedMessage = "【头条】${superChat.userName}：${superChat.message}";
+        final formattedMessage =
+            "【头条】${superChat.userName}：${superChat.message}";
         final scDanmakuMsg = LiveMessage(
           type: LiveMessageType.chat,
           userName: superChat.userName,
@@ -1482,9 +1497,7 @@ class LiveRoomController extends PlayerController
           messages.removeRange(0, 500);
         }
 
-        WidgetsBinding.instance.addPostFrameCallback(
-          (_) => chatScrollToBottom(),
-        );
+        _scheduleChatScrollToBottom();
 
         // 如果当前在播放且不在后台，显示为滚动弹幕
         if (liveStatus.value && !isBackground) {
