@@ -12,14 +12,18 @@ class LiveCategory {
     this.pic,
   });
 
-  @override
-  String toString() {
-    return json.encode({
+  Map<String, dynamic> toJson() {
+    return {
       "name": name,
       "id": id,
       "pic": pic,
-      "children": children,
-    });
+      "children": children.map((child) => child.toJson()).toList(),
+    };
+  }
+
+  @override
+  String toString() {
+    return json.encode(toJson());
   }
 }
 
@@ -38,14 +42,18 @@ class LiveSubCategory {
     this.children = const [], // 默认空列表
   });
 
-  @override
-  String toString() {
-    return json.encode({
+  Map<String, dynamic> toJson() {
+    return {
       "name": name,
       "id": id,
       "parentId": parentId,
       "pic": pic,
-      "children": children,
-    });
+      "children": children.map((child) => child.toJson()).toList(),
+    };
+  }
+
+  @override
+  String toString() {
+    return json.encode(toJson());
   }
 }
