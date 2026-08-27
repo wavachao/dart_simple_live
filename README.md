@@ -23,7 +23,7 @@ Simple Live 是一个基于 Flutter 的开源聚合直播客户端，支持 Andr
 
 | 客户端 | 版本 | 适用场景 |
 | --- | --- | --- |
-| Simple Live | `1.12.8` | 手机、平板及桌面端 |
+| Simple Live | `1.12.9` | 手机、平板及桌面端 |
 | Simple Live TV | `1.7.9` | Android TV、电视盒子及 TV-Windows |
 
 版本说明和具体安装包以 [Releases](https://github.com/wavachao/dart_simple_live/releases) 页面为准。
