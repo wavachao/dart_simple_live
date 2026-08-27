@@ -1,0 +1,299 @@
+name: Build latest binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - "simple_live_app/**"
+      - "simple_live_tv_app/**"
+      - "simple_live_core/**"
+      - ".github/workflows/build_latest_binaries.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-latest-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION_FILE: simple_live_app/.fvmrc
+
+jobs:
+  android:
+    name: Android / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Mobile
+            project: simple_live_app
+            file_prefix: simple-live
+            artifact: simple-live-android
+          - name: TV
+            project: simple_live_tv_app
+            file_prefix: simple-live-tv
+            artifact: simple-live-tv-android
+    env:
+      KEYSTORE_BASE64: ${{ matrix.project == 'simple_live_app' && secrets.KEYSTORE_BASE64 || secrets.TV_KEYSTORE_BASE64 }}
+      STORE_PASSWORD: ${{ matrix.project == 'simple_live_app' && secrets.STORE_PASSWORD || secrets.TV_STORE_PASSWORD }}
+      KEY_PASSWORD: ${{ matrix.project == 'simple_live_app' && secrets.KEY_PASSWORD || secrets.TV_KEY_PASSWORD }}
+      KEY_ALIAS: ${{ matrix.project == 'simple_live_app' && secrets.KEY_ALIAS || secrets.TV_KEY_ALIAS }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: ${{ env.FLUTTER_VERSION_FILE }}
+          cache: true
+
+      - name: Configure Android signing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keystore_path="$RUNNER_TEMP/${{ matrix.file_prefix }}.jks"
+          if [[ -n "${KEYSTORE_BASE64:-}" && -n "${STORE_PASSWORD:-}" && -n "${KEY_PASSWORD:-}" && -n "${KEY_ALIAS:-}" ]]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          else
+            STORE_PASSWORD=ci-build-password
+            KEY_PASSWORD=ci-build-password
+            KEY_ALIAS=ci-build
+            keytool -genkeypair \
+              -keystore "$keystore_path" \
+              -storepass "$STORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 1 \
+              -dname "CN=GitHub Actions CI, OU=CI, O=Simple Live, L=Unknown, S=Unknown, C=CN"
+            echo "Using an ephemeral CI signing key; this build is for testing only."
+          fi
+
+          {
+            printf 'storeFile=%s\n' "$keystore_path"
+            printf 'storePassword=%s\n' "$STORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+          } > "${{ matrix.project }}/android/key.properties"
+
+      - name: Restore packages
+        working-directory: ${{ matrix.project }}
+        run: flutter pub get
+
+      - name: Build APKs and app bundle
+        working-directory: ${{ matrix.project }}
+        run: |
+          flutter build apk --release --split-per-abi
+          flutter build appbundle --release
+
+      - name: Stage Android packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${{ matrix.project }}"
+          prefix="${{ matrix.file_prefix }}"
+          version="$(sed -n 's/^version:[[:space:]]*//p' "$project/pubspec.yaml" | head -n 1)"
+          version="${version//+/-}"
+          output="$project/build/ci-dist"
+          mkdir -p "$output"
+
+          cp "$project/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk" "$output/$prefix-$version-android-arm64.apk"
+          cp "$project/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk" "$output/$prefix-$version-android-armv7.apk"
+          cp "$project/build/app/outputs/flutter-apk/app-x86_64-release.apk" "$output/$prefix-$version-android-x64.apk"
+          cp "$project/build/app/outputs/bundle/release/app-release.aab" "$output/$prefix-$version-android.aab"
+
+      - name: Upload Android packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-${{ github.sha }}
+          path: ${{ matrix.project }}/build/ci-dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  linux:
+    name: Linux / x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: ${{ env.FLUTTER_VERSION_FILE }}
+          cache: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libgtk-3-dev \
+            liblzma-dev \
+            libasound2-dev \
+            libmpv-dev \
+            mpv
+
+      - name: Restore packages
+        working-directory: simple_live_app
+        run: flutter pub get
+
+      - name: Configure Pub tools directory
+        run: |
+          echo "PUB_CACHE=$RUNNER_TEMP/pub-cache" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/pub-cache/bin" >> "$GITHUB_PATH"
+
+      - name: Install desktop packager
+        run: dart pub global activate flutter_distributor
+
+      - name: Build DEB and ZIP
+        working-directory: simple_live_app
+        run: flutter_distributor package --platform linux --targets deb,zip --skip-clean
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: simple-live-linux-x64-${{ github.sha }}
+          path: |
+            simple_live_app/build/dist/**/*.deb
+            simple_live_app/build/dist/**/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  windows:
+    name: Windows / x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: ${{ env.FLUTTER_VERSION_FILE }}
+          cache: true
+
+      - name: Restore packages
+        working-directory: simple_live_app
+        run: flutter pub get
+
+      - name: Configure Pub tools directory
+        run: |
+          "PUB_CACHE=$env:RUNNER_TEMP\pub-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$env:RUNNER_TEMP\pub-cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install desktop packager
+        run: dart pub global activate flutter_distributor
+
+      - name: Build MSIX and ZIP
+        working-directory: simple_live_app
+        run: flutter_distributor package --platform windows --targets msix,zip --skip-clean
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: simple-live-windows-x64-${{ github.sha }}
+          path: |
+            simple_live_app/build/dist/**/*.msix
+            simple_live_app/build/dist/**/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  apple:
+    name: macOS universal and iOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: ${{ env.FLUTTER_VERSION_FILE }}
+          cache: true
+
+      - name: Restore packages
+        working-directory: simple_live_app
+        run: flutter pub get
+
+      - name: Build unsigned iOS app
+        working-directory: simple_live_app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        working-directory: simple_live_app
+        run: |
+          mkdir -p build/ci-dist/ios/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ci-dist/ios/Payload/Runner.app
+          cd build/ci-dist/ios
+          zip -qry simple-live-ios-unsigned.ipa Payload
+          rm -rf Payload
+
+      - name: Configure Pub tools directory
+        run: |
+          echo "PUB_CACHE=$RUNNER_TEMP/pub-cache" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/pub-cache/bin" >> "$GITHUB_PATH"
+
+      - name: Install macOS packager
+        run: |
+          npm install --global appdmg
+          dart pub global activate flutter_distributor
+
+      - name: Build macOS DMG and ZIP
+        working-directory: simple_live_app
+        run: flutter_distributor package --platform macos --targets dmg,zip --skip-clean
+
+      - name: Verify macOS architectures
+        working-directory: simple_live_app
+        run: |
+          app_path="build/macos/Build/Products/Release/Simple Live.app"
+          file "$app_path/Contents/MacOS/Simple Live"
+          lipo -archs "$app_path/Contents/MacOS/Simple Live"
+
+      - name: Upload unsigned iOS package
+        uses: actions/upload-artifact@v7
+        with:
+          name: simple-live-ios-unsigned-${{ github.sha }}
+          path: simple_live_app/build/ci-dist/ios/*.ipa
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload macOS packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: simple-live-macos-universal-${{ github.sha }}
+          path: |
+            simple_live_app/build/dist/**/*.dmg
+            simple_live_app/build/dist/**/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
