@@ -12,6 +12,10 @@ class FollowUser {
     required this.userName,
     required this.face,
     required this.addTime,
+    this.isSpecialFollow = false,
+    this.roomTitle = "",
+    this.roomCover = "",
+    this.previewUpdatedAt,
   });
 
   ///id=siteId_roomId
@@ -33,18 +37,44 @@ class FollowUser {
   @HiveField(5)
   DateTime addTime;
 
+  @HiveField(6)
+  bool isSpecialFollow;
+
+  @HiveField(7)
+  String roomTitle;
+
+  @HiveField(8)
+  String roomCover;
+
+  @HiveField(9)
+  DateTime? previewUpdatedAt;
+
   /// 直播状态
   /// 0=未知(加载中) 1=未开播 2=直播中
   Rx<int> liveStatus = 0.obs;
 
-  factory FollowUser.fromJson(Map<String, dynamic> json) => FollowUser(
-        id: json['id'],
-        roomId: json['roomId'],
-        siteId: json['siteId'],
-        userName: json['userName'],
-        face: json['face'],
-        addTime: DateTime.parse(json['addTime']),
-      );
+  factory FollowUser.fromJson(Map<String, dynamic> json) {
+    final roomId = json['roomId']?.toString().trim() ?? "";
+    final siteId = json['siteId']?.toString().trim() ?? "";
+    final id = (json['id']?.toString().trim().isNotEmpty ?? false)
+        ? json['id'].toString().trim()
+        : "${siteId}_$roomId";
+    return FollowUser(
+      id: id,
+      roomId: roomId,
+      siteId: siteId,
+      userName: json['userName']?.toString() ?? "",
+      face: json['face']?.toString() ?? "",
+      addTime: DateTime.tryParse(json['addTime']?.toString() ?? "") ??
+          DateTime.now(),
+      isSpecialFollow:
+          json["isSpecialFollow"] == true || json["isSpecialFollow"] == 1,
+      roomTitle: json["roomTitle"]?.toString() ?? "",
+      roomCover: json["roomCover"]?.toString() ?? "",
+      previewUpdatedAt:
+          DateTime.tryParse(json["previewUpdatedAt"]?.toString() ?? ""),
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -53,5 +83,9 @@ class FollowUser {
         'userName': userName,
         'face': face,
         'addTime': addTime.toString(),
+        'isSpecialFollow': isSpecialFollow,
+        'roomTitle': roomTitle,
+        'roomCover': roomCover,
+        'previewUpdatedAt': previewUpdatedAt?.toIso8601String() ?? "",
       };
 }
