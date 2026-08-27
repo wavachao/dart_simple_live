@@ -1,15 +1,16 @@
-name: Build latest binaries
+name: Build and publish release packages
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_release:
+        description: "When running on a tag, upload all packages to that Release"
+        type: boolean
+        default: false
   push:
-    branches:
-      - master
-    paths:
-      - "simple_live_app/**"
-      - "simple_live_tv_app/**"
-      - "simple_live_core/**"
-      - ".github/workflows/build_latest_binaries.yml"
+    tags:
+      - "v*"
+      - "tv_v*"
 
 permissions:
   contents: read
@@ -297,3 +298,43 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - android
+      - linux
+      - windows
+      - apple
+    if: >-
+      ${{
+        startsWith(github.ref, 'refs/tags/v') ||
+        startsWith(github.ref, 'refs/tags/tv_v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.upload_release == true && startsWith(github.ref, 'refs/tags/'))
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v5
+        with:
+          pattern: simple-live-*-${{ github.sha }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-assets -type f -print | sort
+          test "$(find release-assets -type f | wc -l)" -gt 0
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'pre') || contains(github.ref_name, 'next') || contains(github.ref_name, 'local') }}
+          files: release-assets/**/*
